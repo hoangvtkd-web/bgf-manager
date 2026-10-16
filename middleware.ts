@@ -9,6 +9,12 @@ import {
 import { createMiddlewareClient } from '@/utils/supabase/middleware-client';
 
 /**
+ * Chuyen middleware sang Node.js runtime thay vi Edge runtime mac dinh.
+ * @supabase/ssr + createServerClient hoat on dinh hon tren Node.js runtime.
+ */
+export const runtime = 'nodejs';
+
+/**
  * Middleware chay truoc MOI request.
  *
  * Nhiem vu:
@@ -19,55 +25,71 @@ import { createMiddlewareClient } from '@/utils/supabase/middleware-client';
  *  4. Da dang nhap ma vao /login hay /register -> day ve /dashboard.
  */
 export async function middleware(request: NextRequest) {
-  const { supabase, getResponse } = createMiddlewareClient(request);
-  const { pathname } = request.nextUrl;
+  // Bao ve: neu chua cau hinh env vars (VD: tren Vercel chua them),
+  // cho qua request de trang khong crash voi 500.
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-  // 1) Bat buoc: refresh session truoc khi doc user
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  const isPublicRoute = PUBLIC_ROUTES.some(
-    (p) => pathname === p || pathname.startsWith(p + '/')
-  );
-
-  // 2) Chua dang nhap
-  if (!user) {
-    if (isPublicRoute) return getResponse();
-
-    const loginUrl = request.nextUrl.clone();
-    loginUrl.pathname = '/login';
-    loginUrl.searchParams.set('redirectTo', pathname);
-    return NextResponse.redirect(loginUrl);
+  if (!supabaseUrl || !supabaseKey) {
+    console.warn('[middleware] NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY is not set. Skipping middleware.');
+    return NextResponse.next();
   }
 
-  // 3) Da dang nhap: lay role tu bang profiles
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('role')
-    .eq('id', user.id)
-    .single<{ role: UserRole }>();
+  try {
+    const { supabase, getResponse } = createMiddlewareClient(request);
+    const { pathname } = request.nextUrl;
 
-  const role: UserRole = profile?.role ?? 'employee';
+    // 1) Bat buoc: refresh session truoc khi doc user
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
 
-  // 4) Da dang nhap ma vao trang auth -> ve dashboard
-  if (isPublicRoute) {
-    const dashUrl = request.nextUrl.clone();
-    dashUrl.pathname = '/dashboard';
-    dashUrl.search = '';
-    return NextResponse.redirect(dashUrl);
+    const isPublicRoute = PUBLIC_ROUTES.some(
+      (p) => pathname === p || pathname.startsWith(p + '/')
+    );
+
+    // 2) Chua dang nhap
+    if (!user) {
+      if (isPublicRoute) return getResponse();
+
+      const loginUrl = request.nextUrl.clone();
+      loginUrl.pathname = '/login';
+      loginUrl.searchParams.set('redirectTo', pathname);
+      return NextResponse.redirect(loginUrl);
+    }
+
+    // 3) Da dang nhap: lay role tu bang profiles
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .single<{ role: UserRole }>();
+
+    const role: UserRole = profile?.role ?? 'employee';
+
+    // 4) Da dang nhap ma vao trang auth -> ve dashboard
+    if (isPublicRoute) {
+      const dashUrl = request.nextUrl.clone();
+      dashUrl.pathname = '/dashboard';
+      dashUrl.search = '';
+      return NextResponse.redirect(dashUrl);
+    }
+
+    // 5) Kiem tra phan quyen theo route
+    const minRole = requiredRoleFor(pathname);
+    if (minRole && !hasRoleAtLeast(role, minRole)) {
+      const deniedUrl = request.nextUrl.clone();
+      deniedUrl.pathname = '/dashboard';
+      deniedUrl.searchParams.set('denied', pathname);
+      return NextResponse.redirect(deniedUrl);
+    }
+
+    return getResponse();
+  } catch (error) {
+    // Neu co bat ky loi runtime nao, cho qua request de trang khong crash 500
+    console.error('[middleware] Runtime error:', error);
+    return NextResponse.next();
   }
-
-  // 5) Kiem tra phan quyen theo route
-  const minRole = requiredRoleFor(pathname);
-  if (minRole && !hasRoleAtLeast(role, minRole)) {
-    const deniedUrl = request.nextUrl.clone();
-    deniedUrl.pathname = '/dashboard';
-    deniedUrl.searchParams.set('denied', pathname);
-    return NextResponse.redirect(deniedUrl);
-  }
-
-  return getResponse();
 }
 
 export const config = {
